@@ -1,0 +1,261 @@
+
+
+from __future__ import annotations
+import math
+import heapq
+import time
+import random
+import csv
+from typing import Dict, Tuple, List, Callable, Optional, Set
+
+# ----------------------------- Graph Data Structure -----------------------------
+class Graph:
+    """A simple, flexible, weighted graph supporting dynamic node insertion.
+    Internally nodes are stored with coordinates (x,y) to allow geometric heuristics.
+    Edges are directed but typical usage will add edges in both directions for undirected.
+    """
+
+    def __init__(self):
+        # node_id -> (x,y)
+        self.positions: Dict[str, Tuple[float, float]] = {}
+        # node_id -> Dict[neighbor_id -> weight]
+        self.adjacency: Dict[str, Dict[str, float]] = {}
+
+    def add_node(self, node_id: str, x: float, y: float) -> None:
+        self.positions[node_id] = (x, y)
+        self.adjacency.setdefault(node_id, {})
+
+    def add_edge(self, u: str, v: str, weight: float) -> None:
+        if u not in self.adjacency:
+            raise KeyError(f"Node {u} not found")
+        self.adjacency[u][v] = weight
+
+    def neighbors(self, node_id: str) -> Dict[str, float]:
+        return self.adjacency.get(node_id, {})
+
+    def distance(self, u: str, v: str) -> float:
+        (ux, uy) = self.positions[u]
+        (vx, vy) = self.positions[v]
+        return math.hypot(ux - vx, uy - vy)
+
+# ----------------------------- A* Implementation -----------------------------
+
+class AStarResult:
+    def __init__(self, path: List[str], cost: float, nodes_expanded: int, runtime: float):
+        self.path = path
+        self.cost = cost
+        self.nodes_expanded = nodes_expanded
+        self.runtime = runtime
+
+
+class AStar:
+    def __init__(self, graph: Graph, heuristic: Callable[[str, str, Graph], float]):
+        self.graph = graph
+        self.heuristic = heuristic
+
+    def search(self, start: str, goal: str) -> Optional[AStarResult]:
+        t0 = time.perf_counter()
+
+        # g-score: best-known cost from start to node
+        g_score: Dict[str, float] = {start: 0.0}
+        # f-score = g + h
+        f_score: Dict[str, float] = {start: self.heuristic(start, goal, self.graph)}
+
+        # priority queue stores tuples (f, tie, node)
+        open_heap: List[Tuple[float, int, str]] = []
+        counter = 0
+        heapq.heappush(open_heap, (f_score[start], counter, start))
+
+        came_from: Dict[str, str] = {}
+
+        closed: Set[str] = set()
+        nodes_expanded = 0
+
+        while open_heap:
+            current_f, _, current = heapq.heappop(open_heap)
+
+            # If we pop a node already closed (duplicate in heap), skip
+            if current in closed:
+                continue
+
+            if current == goal:
+                t1 = time.perf_counter()
+                path = self._reconstruct_path(came_from, start, goal)
+                return AStarResult(path=path, cost=g_score[goal], nodes_expanded=nodes_expanded, runtime=t1 - t0)
+
+            closed.add(current)
+            nodes_expanded += 1
+
+            for neighbor, weight in self.graph.neighbors(current).items():
+                tentative_g = g_score[current] + weight
+
+                if neighbor in closed and tentative_g >= g_score.get(neighbor, float('inf')):
+                    continue
+
+                if tentative_g < g_score.get(neighbor, float('inf')):
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g
+                    f = tentative_g + self.heuristic(neighbor, goal, self.graph)
+                    counter += 1
+                    heapq.heappush(open_heap, (f, counter, neighbor))
+
+        # No path found
+        t1 = time.perf_counter()
+        return None
+
+    def _reconstruct_path(self, came_from: Dict[str, str], start: str, goal: str) -> List[str]:
+        path = [goal]
+        cur = goal
+        while cur != start:
+            cur = came_from.get(cur)
+            if cur is None:
+                # Should not happen if goal was reached
+                break
+            path.append(cur)
+        path.reverse()
+        return path
+
+# ----------------------------- Heuristics -----------------------------
+
+def h_zero(u: str, v: str, graph: Graph) -> float:
+    return 0.0
+
+
+def h_euclidean(u: str, v: str, graph: Graph) -> float:
+    return graph.distance(u, v)
+
+
+def h_inadmissible(u: str, v: str, graph: Graph, scale: float = 1.5) -> float:
+    # Scaling Euclidean by a factor > 1 to produce a non-admissible heuristic
+    return graph.distance(u, v) * scale
+
+# ----------------------------- Test Graph Generator -----------------------------
+
+def generate_weighted_grid(width: int, height: int, obstacle_prob: float = 0.2, weight_range: Tuple[float, float] = (1.0, 5.0), diagonal: bool = False) -> Tuple[Graph, str, str]:
+    """
+    Create a 2D grid graph with random weights and obstacles.
+    Node ids are strings 'x_y'. Position is (x,y).
+    Edges added between 4-neighbors (optionally 8-neighbors) with random weight in weight_range.
+    Some nodes will be removed to simulate obstacles.
+    Returns (graph, start_id, goal_id)
+    """
+    g = Graph()
+
+    # create nodes
+    for y in range(height):
+        for x in range(width):
+            node_id = f"{x}_{y}"
+            g.add_node(node_id, float(x), float(y))
+
+    # mark obstacles
+    obstacles: Set[str] = set()
+    for y in range(height):
+        for x in range(width):
+            if random.random() < obstacle_prob:
+                obstacles.add(f"{x}_{y}")
+
+    # ensure at least two free nodes
+    free_nodes = [n for n in g.positions.keys() if n not in obstacles]
+    if len(free_nodes) < 2:
+        # relax obstacles if too many
+        obstacles = set(list(obstacles)[: max(0, len(obstacles)-2)])
+        free_nodes = [n for n in g.positions.keys() if n not in obstacles]
+
+    # add edges between neighbors
+    directions4 = [(1,0),(-1,0),(0,1),(0,-1)]
+    directions8 = directions4 + [(1,1),(1,-1),(-1,1),(-1,-1)]
+    dirs = directions8 if diagonal else directions4
+
+    for y in range(height):
+        for x in range(width):
+            u = f"{x}_{y}"
+            if u in obstacles:
+                continue
+            for dx, dy in dirs:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < width and 0 <= ny < height:
+                    v = f"{nx}_{ny}"
+                    if v in obstacles:
+                        continue
+                    # weight depends on base random weight and diagonal vs straight
+                    base = random.uniform(*weight_range)
+                    if (dx != 0 and dy != 0):
+                        # diagonal move cost roughly sqrt(2) times
+                        weight = base * math.sqrt(2)
+                    else:
+                        weight = base
+                    g.add_edge(u, v, weight)
+
+    # pick start and goal from free nodes far apart
+    if len(free_nodes) < 2:
+        raise RuntimeError("Not enough free nodes for start/goal selection")
+
+    # heuristic: choose endpoints with roughly maximal Euclidean separation
+    far_pair = (None, None, -1.0)
+    for i in range(200):  # sample up to 200 random pairs
+        a = random.choice(free_nodes)
+        b = random.choice(free_nodes)
+        if a == b:
+            continue
+        d = g.distance(a, b)
+        if d > far_pair[2]:
+            far_pair = (a, b, d)
+
+    start, goal = far_pair[0], far_pair[1]
+    return g, start, goal
+
+# ----------------------------- Experiment Harness -----------------------------
+
+def run_experiment(graph: Graph, start: str, goal: str, heuristics: Dict[str, Callable[[str, str, Graph], float]]) -> List[Tuple[str, Optional[AStarResult]]]:
+    results = []
+    for name, hfunc in heuristics.items():
+        astar = AStar(graph, hfunc)
+        res = astar.search(start, goal)
+        results.append((name, res))
+    return results
+
+# ----------------------------- Main / Example Runs -----------------------------
+
+def main():
+    random.seed(42)
+
+    # generate a medium-sized grid
+    width, height = 30, 20
+    graph, start, goal = generate_weighted_grid(width, height, obstacle_prob=0.18, weight_range=(1.0, 4.0), diagonal=False)
+
+    # heuristics dictionary (wrap inadmissible to match signature)
+    heuristics = {
+        'h_zero (admissible, weak)': h_zero,
+        'h_euclidean (admissible, informed)': h_euclidean,
+        'h_inadmissible x1.5 (non-admissible)': lambda u,v,g: h_inadmissible(u,v,g,scale=1.5)
+    }
+
+    runs = run_experiment(graph, start, goal, heuristics)
+
+    # prepare CSV
+    csv_rows = []
+    print(f"Start: {start}  Goal: {goal}")
+    for name, res in runs:
+        if res is None:
+            print(f"{name}: No path found")
+            csv_rows.append({'heuristic': name, 'runtime_s': None, 'nodes_expanded': None, 'path_cost': None, 'path_length': None})
+            continue
+
+        print(f"Heuristic: {name}")
+        print(f"  runtime (s): {res.runtime:.6f}")
+        print(f"  nodes expanded: {res.nodes_expanded}")
+        print(f"  path cost: {res.cost:.4f}")
+        print(f"  path length: {len(res.path)}")
+        csv_rows.append({'heuristic': name, 'runtime_s': res.runtime, 'nodes_expanded': res.nodes_expanded, 'path_cost': res.cost, 'path_length': len(res.path)})
+
+    csv_filename = 'astar_results.csv'
+    with open(csv_filename, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['heuristic','runtime_s','nodes_expanded','path_cost','path_length'])
+        writer.writeheader()
+        for row in csv_rows:
+            writer.writerow(row)
+
+    print(f"Results written to {csv_filename}")
+
+if __name__ == '__main__':
+    main()
